@@ -1,4 +1,8 @@
 # Changelog
+## Halaman publik
+
+- Menambahkan landing page QRIS Gateway untuk pengunjung, dengan alur invoice, fitur yang tersedia, batas produksi/sandbox, serta tautan masuk, pendaftaran, ketentuan, dan privasi.
+- Route `/` menampilkan landing page sebelum login; route `/register` membuka formulir pendaftaran dan kembali ke ringkasan setelah autentikasi.
 
 ## Dokumentasi integrasi website
 

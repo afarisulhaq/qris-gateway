@@ -2,8 +2,8 @@
   import { untrack } from 'svelte';
   import { api, message } from '../lib/api';
   import type { User } from '../lib/api';
-  let { setupRequired, onauthenticated }: { setupRequired: boolean; onauthenticated: (user: User) => void } = $props();
-  let register = $state(untrack(() => setupRequired));
+  let { setupRequired, onauthenticated, initialRegister = false }: { setupRequired: boolean; onauthenticated: (user: User) => void; initialRegister?: boolean } = $props();
+  let register = $state(untrack(() => setupRequired || initialRegister));
   let name = $state('');
   let email = $state('');
   let password = $state('');

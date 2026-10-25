@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Auth from './pages/Auth.svelte';
+  import Landing from './pages/Landing.svelte';
   import Dashboard from './pages/Dashboard.svelte';
   import Transactions from './pages/Transactions.svelte';
   import Connections from './pages/Connections.svelte';
@@ -47,7 +48,7 @@
     user = result[0]; paymentMode = result[1].rental_payment_mode;
   }
   async function authenticated(account: User) {
-    user = account; setupRequired = false; error = ''; loading = true;
+    user = account; setupRequired = false; error = ''; loading = true; navigate('/');
     try { await refreshAccount(); } catch (e) { error = message(e); } finally { loading = false; }
   }
   async function logout() {
@@ -87,15 +88,13 @@
     return () => { window.removeEventListener('popstate', pop); document.removeEventListener('click', click); document.removeEventListener('keydown', keydown); };
   });
 </script>
-<svelte:head><title>{publicPage ? 'Pembayaran & informasi' : user ? currentPage : 'Masuk'} · QRIS Gateway</title><meta name="description" content="Kelola invoice QRIS, koneksi gateway merchant, dan masa sewa 7 atau 30 hari." /></svelte:head>
+<svelte:head><title>{publicPage ? 'Pembayaran & informasi' : user ? currentPage : route === '/' ? 'Kelola invoice QRIS' : 'Masuk'} · QRIS Gateway</title><meta name="description" content="Kelola invoice QRIS, koneksi gateway merchant, dan masa sewa 7 atau 30 hari." /></svelte:head>
 <a href="#main-content" class="skip-link">Lewati ke konten</a>
 {#if publicPage}
   <main id="main-content" tabindex="-1">{#key route}{#if route.startsWith('/pay/')}<Checkout token={route.slice(5)} />{:else}<Legal kind={route === '/terms' ? 'terms' : 'privacy'} />{/if}{/key}</main>
 {:else if loading}
   <main class="startup" id="main-content" tabindex="-1"><a class="wordmark" href="/">QRIS Gateway</a><p class="loading" role="status">Menyiapkan ruang pembayaran…</p></main>
-{:else if !user}
-  <main id="main-content" tabindex="-1">{#if error}<div class="startup"><p class="notice error" role="alert">{error}</p><button class="secondary" onclick={initialize}>Hubungkan kembali ke server</button></div>{:else}<Auth {setupRequired} onauthenticated={authenticated} />{/if}</main>
-  <footer class="auth-footer legal-links"><a href="/terms">Ketentuan layanan</a><a href="/privacy">Kebijakan privasi</a></footer>
+{:else if !user}<main id="main-content" tabindex="-1">{#if error}<div class="startup"><p class="notice error" role="alert">{error}</p><button class="secondary" onclick={initialize}>Hubungkan kembali ke server</button></div>{:else if route === '/'}<Landing />{:else}<Auth {setupRequired} initialRegister={route === '/register'} onauthenticated={authenticated} />{/if}</main><footer class="auth-footer legal-links"><a href="/terms">Ketentuan layanan</a><a href="/privacy">Kebijakan privasi</a></footer>
 {:else}
   <div class="app-layout">
     <aside class="sidebar"><div class="brand-row"><a class="wordmark" href="/">QRIS<br class="desktop-break" /> Gateway<span>Ruang pembayaran Anda.</span></a><button class="menu-button secondary" aria-expanded={menu} aria-controls="workspace-nav" onclick={() => { menu = !menu; }}>Menu</button></div>
