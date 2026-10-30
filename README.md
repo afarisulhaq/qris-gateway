@@ -203,6 +203,14 @@ Admin menetapkan harga 7/30 hari dan menghubungkan dompetnya sendiri pada Dompet
 
 ## Produksi dan Docker
 
+Service `app` terhubung ke network eksternal `web` untuk reverse proxy Docker dan network default untuk PostgreSQL. Service `database` hanya memakai network default. Buat network sekali jika belum tersedia:
+
+```sh
+docker network inspect web >/dev/null 2>&1 || docker network create web
+```
+
+Hubungkan container reverse proxy ke network `web`, lalu arahkan upstream ke `app:3100` (atau gunakan `127.0.0.1:3100` untuk proxy di host).
+
 ```sh
 bun run build
 # Atur APP_URL ke origin HTTPS publik, HOST/PORT sesuai reverse proxy.

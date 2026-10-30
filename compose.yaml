@@ -17,6 +17,9 @@ services:
       retries: 10
   app:
     build: .
+    networks:
+      - default
+      - web
     restart: unless-stopped
     env_file: .env
     depends_on:
@@ -40,3 +43,8 @@ services:
 volumes:
   qris-data:
   qris-postgres:
+
+networks:
+  web:
+    external: true
+    name: web

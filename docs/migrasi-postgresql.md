@@ -21,6 +21,8 @@ df -h .
 free -h
 ```
 
+Service `app` memakai network eksternal `web` untuk reverse proxy Docker; proxy pada network tersebut dapat memakai upstream `app:3100`. Database tetap hanya terhubung ke network default proyek. Network `web` harus dibuat sekali sebelum menjalankan aplikasi.
+
 Compose menyediakan PostgreSQL 18 dengan volume `qris-postgres`. Volume `qris-data` tetap menyimpan wallet. Jangan menjalankan `docker compose down -v`: opsi `-v` menghapus volume data.
 
 ## A. Server lama sudah memakai Docker Compose
@@ -81,6 +83,7 @@ Di dalam Compose, URL aplikasi otomatis menjadi `postgresql://qris:...@database:
 
 ```bash
 chmod 600 .env
+docker network inspect web >/dev/null 2>&1 || docker network create web
 docker compose config --quiet
 docker compose build app
 docker compose up -d --wait --wait-timeout 60 database
