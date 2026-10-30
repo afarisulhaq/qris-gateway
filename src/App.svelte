@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Auth from './pages/Auth.svelte';
+  import NavIcon from './components/NavIcon.svelte';
   import Landing from './pages/Landing.svelte';
   import Dashboard from './pages/Dashboard.svelte';
   import Transactions from './pages/Transactions.svelte';
@@ -26,12 +27,12 @@
   let revision = $state(0);
   let invoiceDialog = $state<{ open: () => Promise<void> }>();
   const nav = [
-    { path: '/', label: 'Ringkasan', number: '01' },
-    { path: '/transactions', label: 'Transaksi', number: '02' },
-    { path: '/connections', label: 'Dompet QRIS', number: '03' },
-    { path: '/integrations', label: 'API & webhook', number: '04' },
-    { path: '/subscription', label: 'Langganan', number: '05' },
-    { path: '/guide', label: 'Panduan lengkap', number: '06' }
+    { path: '/', label: 'Ringkasan', icon: 'overview' },
+    { path: '/transactions', label: 'Transaksi', icon: 'transactions' },
+    { path: '/connections', label: 'Dompet QRIS', icon: 'wallet' },
+    { path: '/integrations', label: 'API & webhook', icon: 'integration' },
+    { path: '/subscription', label: 'Langganan', icon: 'subscription' },
+    { path: '/guide', label: 'Panduan lengkap', icon: 'guide' }
   ];
   const currentPage = $derived(nav.find(item => item.path === route)?.label || (route === '/admin' ? 'Admin' : 'Invoice'));
   const publicPage = $derived(route.startsWith('/pay/') || route === '/terms' || route === '/privacy');
@@ -97,9 +98,17 @@
 {:else if !user}<main id="main-content" tabindex="-1">{#if error}<div class="startup"><p class="notice error" role="alert">{error}</p><button class="secondary" onclick={initialize}>Hubungkan kembali ke server</button></div>{:else if route === '/'}<Landing />{:else}<Auth {setupRequired} initialRegister={route === '/register'} onauthenticated={authenticated} />{/if}</main><footer class="auth-footer legal-links"><a href="/terms">Ketentuan layanan</a><a href="/privacy">Kebijakan privasi</a></footer>
 {:else}
   <div class="app-layout">
-    <aside class="sidebar"><div class="brand-row"><a class="wordmark" href="/">QRIS<br class="desktop-break" /> Gateway<span>Ruang pembayaran Anda.</span></a><button class="menu-button secondary" aria-expanded={menu} aria-controls="workspace-nav" onclick={() => { menu = !menu; }}>Menu</button></div>
-      <div id="workspace-nav" class:menu-open={menu} class="sidebar-content"><nav aria-label="Navigasi utama">{#each nav as item}<a href={item.path} class:active={route === item.path || (item.path === '/transactions' && route.startsWith('/transactions/'))} aria-current={route === item.path ? 'page' : undefined}><span class="nav-number" aria-hidden="true">{item.number}</span>{item.label}</a>{/each}{#if user.role === 'admin'}<a href="/admin" class:active={route === '/admin'} aria-current={route === '/admin' ? 'page' : undefined}><span class="nav-number" aria-hidden="true">07</span>Admin</a>{/if}</nav>
-        <div class="sidebar-bottom"><div class="account"><span class="eyebrow">{user.role === 'admin' ? 'Administrator' : 'Akun merchant'}</span><strong>{user.name}</strong><span class="small muted">{user.email}</span></div><button class="quiet logout" disabled={loggingOut} onclick={logout}>{loggingOut ? 'Keluar…' : 'Keluar dari akun'}</button><div class="sidebar-legal"><a href="/terms">Ketentuan</a><a href="/privacy">Privasi</a></div></div>
+    <aside class="sidebar">
+      <div class="brand-row"><a class="wordmark app-wordmark" href="/"><img src="/favicon.svg" width="36" height="36" alt="" /><span class="brand-name">QRIS Gateway<small>Ruang pembayaran Anda.</small></span></a></div>
+      <div class="sidebar-content" class:menu-open={menu}>
+        <nav aria-label="Navigasi utama">
+          {#each nav as item, index}
+            <a id={index > 2 ? `secondary-nav-${index}` : undefined} href={item.path} class:secondary-nav={index > 2} class:active={route === item.path || (item.path === '/transactions' && route.startsWith('/transactions/'))} aria-current={route === item.path || (item.path === '/transactions' && route.startsWith('/transactions/')) ? 'page' : undefined}><NavIcon name={item.icon} /><span>{item.label}</span></a>
+          {/each}
+          {#if user.role === 'admin'}<a id="admin-nav" href="/admin" class="secondary-nav" class:active={route === '/admin'} aria-current={route === '/admin' ? 'page' : undefined}><NavIcon name="admin" /><span>Admin</span></a>{/if}
+          <button class="menu-button" class:active={menu || nav.slice(3).some(item => item.path === route) || route === '/admin'} aria-expanded={menu} aria-controls={`secondary-nav-3 secondary-nav-4 secondary-nav-5 ${user.role === 'admin' ? 'admin-nav ' : ''}account-menu`} onclick={() => { menu = !menu; }}><NavIcon name={menu ? 'close' : 'more'} /><span>{menu ? 'Tutup' : 'Lainnya'}</span></button>
+        </nav>
+        <div id="account-menu" class="sidebar-bottom"><div class="account"><span class="eyebrow">{user.role === 'admin' ? 'Administrator' : 'Akun merchant'}</span><strong>{user.name}</strong><span class="small muted">{user.email}</span></div><button class="quiet logout" disabled={loggingOut} onclick={logout}><NavIcon name="logout" />{loggingOut ? 'Keluar…' : 'Keluar dari akun'}</button><div class="sidebar-legal"><a href="/terms">Ketentuan</a><a href="/privacy">Privasi</a></div></div>
       </div>
     </aside>
     <div class="workspace"><header class="workspace-bar"><span>{currentPage}</span><label class="environment-picker">Lingkungan<select value={$environment} onchange={changeEnvironment}><option value="production">Produksi</option><option value="sandbox">Sandbox</option></select></label><a href="/subscription" class="rental-indicator">{user.role === 'admin' ? 'Akses admin' : user.subscription_active ? `Sewa aktif · ${date(user.subscription_expires_at)}` : 'Gratis · 5 invoice/hari WIB'}</a></header>
