@@ -7,3 +7,6 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Private deployment backups (database, wallet sessions, and environment secrets).
+/backups/

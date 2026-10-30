@@ -12,7 +12,8 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "start": "NODE_ENV=production bun server/index.ts",
-    "test": "bun test"
+    "test": "bun run scripts/test.ts",
+    "db:import:sqlite": "bun run scripts/migrate-sqlite.ts"
   },
   "dependencies": {
     "@zxing/browser": "^0.1.5",

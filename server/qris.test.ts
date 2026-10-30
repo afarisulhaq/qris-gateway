@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 
-process.env.DATABASE_PATH = ':memory:';
+if (process.env.QRIS_TEST_DATABASE !== '1') throw new Error('Jalankan bun run test dengan TEST_DATABASE_URL.');
 const { qrisCrc, validateStaticQris, validatePaymentQris } = await import('./qris');
 const field = (tag: string, value: string) => tag + String(value.length).padStart(2, '0') + value;
 function fixture(method = '11', amount?: number) {

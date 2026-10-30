@@ -67,41 +67,41 @@ export async function validateWebhookUrl(raw: string): Promise<{ url: URL; addre
 export async function saveWebhook(userId: string, raw: string, environment: Environment) {
   const target = await validateWebhookUrl(raw);
   const secret = newSecret();
-  db.query(`INSERT INTO webhooks(user_id, environment, url, encrypted_secret) VALUES (?, ?, ?, ?)
+  await db.query(`INSERT INTO webhooks(user_id, environment, url, encrypted_secret) VALUES ($1, $2, $3, $4)
     ON CONFLICT(user_id, environment) DO UPDATE SET url = excluded.url, encrypted_secret = excluded.encrypted_secret`)
     .run(userId, environment, target.url.toString(), encrypt(secret));
   return { environment, url: target.url.toString(), secret };
 }
 
-export function webhookData(userId: string, environment: Environment) {
-  const setting = db.query<{ url: string }, [string, Environment]>(
-    'SELECT url FROM webhooks WHERE user_id = ? AND environment = ?').get(userId, environment);
-  const deliveries = db.query<{
+export async function webhookData(userId: string, environment: Environment) {
+  const setting = await db.query<{ url: string }, [string, Environment]>(
+    'SELECT url FROM webhooks WHERE user_id = $1 AND environment = $2').get(userId, environment);
+  const deliveries = await db.query<{
     id: string; environment: Environment; event: string; status: number | null; created_at: string; error: string | null;
   }, [string, Environment]>(`SELECT id, environment, event, status, created_at, error FROM webhook_deliveries
-    WHERE user_id = ? AND environment = ? ORDER BY created_at DESC LIMIT 100`).all(userId, environment);
+    WHERE user_id = $1 AND environment = $2 ORDER BY created_at DESC LIMIT 100`).all(userId, environment);
   return { environment, url: setting?.url || '', configured: Boolean(setting), deliveries };
 }
 
-export function deleteWebhook(userId: string, environment: Environment): void {
-  atomic(() => {
-    db.query('DELETE FROM webhooks WHERE user_id = ? AND environment = ?').run(userId, environment);
-    db.query(`UPDATE webhook_deliveries SET next_attempt_at = NULL, error = 'Webhook dinonaktifkan.'
-      WHERE user_id = ? AND environment = ? AND delivered_at IS NULL`).run(userId, environment);
+export async function deleteWebhook(userId: string, environment: Environment): Promise<void> {
+  await atomic(async () => {
+    await db.query('DELETE FROM webhooks WHERE user_id = $1 AND environment = $2').run(userId, environment);
+    await db.query(`UPDATE webhook_deliveries SET next_attempt_at = NULL, error = 'Webhook dinonaktifkan.'
+      WHERE user_id = $1 AND environment = $2 AND delivered_at IS NULL`).run(userId, environment);
   });
 }
 
-export function retryWebhook(userId: string, deliveryId: string, environment: Environment): void {
-  atomic(() => {
-    const delivery = db.query<Delivery & { lease_until: string | null }, [string, string, Environment]>(
-      'SELECT * FROM webhook_deliveries WHERE id = ? AND user_id = ? AND environment = ?').get(deliveryId, userId, environment);
+export async function retryWebhook(userId: string, deliveryId: string, environment: Environment): Promise<void> {
+  await atomic(async () => {
+    const delivery = await db.query<Delivery & { lease_until: string | null }, [string, string, Environment]>(
+      'SELECT * FROM webhook_deliveries WHERE id = $1 AND user_id = $2 AND environment = $3').get(deliveryId, userId, environment);
     if (!delivery) throw new BusinessError(404, 'Pengiriman webhook tidak ditemukan.');
-    if (!db.query('SELECT user_id FROM webhooks WHERE user_id = ? AND environment = ?').get(userId, environment)) {
+    if (!(await db.query('SELECT user_id FROM webhooks WHERE user_id = $1 AND environment = $2').get(userId, environment))) {
       throw new BusinessError(409, 'Aktifkan webhook environment ini sebelum mengirim ulang.');
     }
     if (delivery.delivered_at) throw new BusinessError(409, 'Event ini sudah berhasil dikirim.');
     if (delivery.lease_until && delivery.lease_until > now()) throw new BusinessError(409, 'Event ini sedang dikirim.');
-    db.query('UPDATE webhook_deliveries SET attempts = 0, next_attempt_at = ?, lease_until = NULL, error = NULL WHERE id = ?')
+    await db.query('UPDATE webhook_deliveries SET attempts = 0, next_attempt_at = $1, lease_until = NULL, error = NULL WHERE id = $2')
       .run(now(), deliveryId);
   });
 }
@@ -137,15 +137,15 @@ async function postPinned(delivery: Delivery): Promise<number> {
 
 export async function dispatchWebhookBatch(): Promise<void> {
   const lease = new Date(Date.now() + 60_000).toISOString();
-  const deliveries = atomic(() => {
+  const deliveries = await atomic(async () => {
     const timestamp = now();
-    const due = db.query<Delivery, [string, string]>(`SELECT webhook_deliveries.* FROM webhook_deliveries
+    const due = await db.query<Delivery, [string, string]>(`SELECT webhook_deliveries.* FROM webhook_deliveries
       JOIN invoices ON invoices.id = webhook_deliveries.invoice_id AND invoices.environment = webhook_deliveries.environment
       JOIN webhooks ON webhooks.user_id = webhook_deliveries.user_id AND webhooks.environment = webhook_deliveries.environment
-      WHERE delivered_at IS NULL AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?
-      AND (lease_until IS NULL OR lease_until <= ?) AND attempts < 6 ORDER BY next_attempt_at LIMIT 10`)
+      WHERE delivered_at IS NULL AND next_attempt_at IS NOT NULL AND next_attempt_at <= $1
+      AND (lease_until IS NULL OR lease_until <= $2) AND attempts < 6 ORDER BY next_attempt_at LIMIT 10`)
       .all(timestamp, timestamp);
-    for (const entry of due) db.query('UPDATE webhook_deliveries SET lease_until = ?, attempts = attempts + 1 WHERE id = ?').run(lease, entry.id);
+    for (const entry of due) await db.query('UPDATE webhook_deliveries SET lease_until = $1, attempts = attempts + 1 WHERE id = $2').run(lease, entry.id);
     return due;
   });
   await Promise.all(deliveries.map(async delivery => {
@@ -160,8 +160,8 @@ export async function dispatchWebhookBatch(): Promise<void> {
     const success = status !== null && status >= 200 && status < 300;
     const retryDelays = [60_000, 300_000, 1_800_000, 7_200_000, 21_600_000];
     const delay = retryDelays[delivery.attempts];
-    db.query(`UPDATE webhook_deliveries SET status = ?, error = ?, lease_until = NULL, delivered_at = ?, next_attempt_at = ?
-      WHERE id = ? AND lease_until = ?`)
+    await db.query(`UPDATE webhook_deliveries SET status = $1, error = $2, lease_until = NULL, delivered_at = $3, next_attempt_at = $4
+      WHERE id = $5 AND lease_until = $6`)
       .run(status, error, success ? now() : null, !success && delay !== undefined ? new Date(Date.now() + delay).toISOString() : null, delivery.id, lease);
   }));
 }

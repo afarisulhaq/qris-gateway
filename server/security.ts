@@ -83,23 +83,23 @@ export function publicUser(user: UserRow) {
 }
 
 
-export function sessionUser(request: Request): UserRow {
+export async function sessionUser(request: Request): Promise<UserRow> {
   const cookie = request.headers.get('cookie') || '';
   const token = cookie.split(';').map(part => part.trim()).find(part => part.startsWith('qris_session='))?.slice(13);
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new BusinessError(401, 'Silakan masuk terlebih dahulu.');
-  const user = db.query<UserRow, [string, string]>(`
+  const user = await db.query<UserRow, [string, string]>(`
     SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+    WHERE sessions.token_hash = $1 AND sessions.expires_at > $2
   `).get(hashSecret(token), now());
   if (!user) throw new BusinessError(401, 'Sesi sudah berakhir. Silakan masuk kembali.');
   return user;
 }
 
-export function apiUser(request: Request): UserRow & { environment: Environment } {
+export async function apiUser(request: Request): Promise<UserRow & { environment: Environment }> {
   const key = request.headers.get('x-api-key');
   if (!key || key.length > 200) throw new BusinessError(401, 'X-API-Key wajib diisi.');
-  const user = db.query<UserRow & { environment: Environment }, [string]>(`
-    SELECT users.*, api_keys.environment FROM api_keys JOIN users ON users.id = api_keys.user_id WHERE api_keys.key_hash = ?
+  const user = await db.query<UserRow & { environment: Environment }, [string]>(`
+    SELECT users.*, api_keys.environment FROM api_keys JOIN users ON users.id = api_keys.user_id WHERE api_keys.key_hash = $1
   `).get(hashSecret(key));
   if (!user) throw new BusinessError(401, 'API key tidak valid atau sudah dicabut.');
   const requested = new URL(request.url).searchParams.get('environment');
@@ -109,8 +109,8 @@ export function apiUser(request: Request): UserRow & { environment: Environment 
   return user;
 }
 
-export function adminUser(request: Request): UserRow {
-  const user = sessionUser(request);
+export async function adminUser(request: Request): Promise<UserRow> {
+  const user = await sessionUser(request);
   if (user.role !== 'admin') throw new BusinessError(403, 'Hanya admin yang dapat melakukan tindakan ini.');
   return user;
 }

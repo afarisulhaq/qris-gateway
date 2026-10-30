@@ -1,3 +1,4 @@
+if (process.env.QRIS_TEST_DATABASE !== '1') throw new Error('Jalankan bun run test dengan TEST_DATABASE_URL.');
 import { expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -19,11 +20,11 @@ test('original gateway processes preserve each wallet identity and payment amoun
     const {ensureGateway,gatewayLogs,shutdownGateways}=await import('./server/gateway-runtime.ts');
     const field=(tag,value)=>tag+String(value.length).padStart(2,'0')+value;
     const template=name=>{const p=field('00','01')+field('01','11')+field('51',field('00','ID.CO.QRIS.WWW')+field('01','TEST-ONLY-NOT-PAYABLE'))+field('52','5812')+field('53','360')+field('58','ID')+field('59',name)+field('60','JAKARTA')+'6304';return p+qrisCrc(p);};
-    const user=id();db.query("INSERT INTO users(id,name,email,password_hash,role,created_at) VALUES (?,'Test','gateway@example.test','unused','merchant',?)").run(user,now());
+    const user=id();(await db.query("INSERT INTO users(id,name,email,password_hash,role,created_at) VALUES ($1,'Test','gateway@example.test','unused','merchant',$2)").run(user,now()));
     const wallets=[];
     for(const [provider,name] of [['gopay','TEST 6304 QR A'],['gopay','TEST QR B'],['shopeepay','TEST SHOPEE QR']]){
       const wallet=id(),api_key=id();const secrets={api_key,qris_static:template(name),...(provider==='gopay'?{merchant_id:name}:{shopee_token:'B:TEST-ONLY-INVALID'})};
-      db.query("INSERT INTO connections(id,user_id,provider,base_url,encrypted_secrets,label,managed) VALUES (?,?,?,'http://127.0.0.1:0',?,?,1)").run(wallet,user,provider,encrypt(JSON.stringify(secrets)),name);
+      (await db.query("INSERT INTO connections(id,user_id,provider,base_url,encrypted_secrets,label,managed) VALUES ($1,$2,$3,'http://127.0.0.1:0',$4,$5,1)").run(wallet,user,provider,encrypt(JSON.stringify(secrets)),name));
       wallets.push({id:wallet,provider,name,base_url:'http://127.0.0.1:0',api_key,managed:true});
     }
     try{
@@ -33,12 +34,12 @@ test('original gateway processes preserve each wallet identity and payment amoun
         outputs.push({merchant:decoded.merchant_name,amount,qr_url:payment.qr_url,origin:new URL(runtime.base_url).hostname,leaksToken:JSON.stringify(logs).includes('B:TEST-ONLY-INVALID')});
       }
       console.log(JSON.stringify(outputs));
-    }finally{await shutdownGateways();db.close();}
+    }finally{await shutdownGateways();(await db.close());}
   `;
   try {
     const child = Bun.spawn(['bun', '-e', script], {
       cwd: resolve(import.meta.dir, '..'),
-      env: { ...process.env, DATABASE_PATH: ':memory:', GATEWAY_DATA_DIR: directory, GATEWAY_NODE_BINARY: executable, ENCRYPTION_KEY: 'b'.repeat(64) },
+      env: { ...process.env, GATEWAY_DATA_DIR: directory, GATEWAY_NODE_BINARY: executable, ENCRYPTION_KEY: 'b'.repeat(64) },
       stdout: 'pipe', stderr: 'pipe',
     });
     const stdout = await new Response(child.stdout).text();
@@ -132,8 +133,8 @@ test('original GoPay gateway converts analytics minor units and matches only rec
     const {checkPayment}=await import('./server/providers.ts');
     const {shutdownGateways}=await import('./server/gateway-runtime.ts');
     const user=id(),wallet=id();
-    db.query("INSERT INTO users(id,name,email,password_hash,role,created_at) VALUES (?,'Test','proof@example.test','unused','merchant',?)").run(user,now());
-    db.query("INSERT INTO connections(id,user_id,provider,base_url,encrypted_secrets,label,managed) VALUES (?,?,'gopay','http://127.0.0.1:0',?,'TEST ONLY',1)").run(wallet,user,encrypt(JSON.stringify({api_key:id(),merchant_id:'TEST-ONLY',qris_static:'TEST-ONLY-NOT-PAYABLE'})));
+    (await db.query("INSERT INTO users(id,name,email,password_hash,role,created_at) VALUES ($1,'Test','proof@example.test','unused','merchant',$2)").run(user,now()));
+    (await db.query("INSERT INTO connections(id,user_id,provider,base_url,encrypted_secrets,label,managed) VALUES ($1,$2,'gopay','http://127.0.0.1:0',$3,'TEST ONLY',1)").run(wallet,user,encrypt(JSON.stringify({api_key:id(),merchant_id:'TEST-ONLY',qris_static:'TEST-ONLY-NOT-PAYABLE'}))));
     const connection={id:wallet,provider:'gopay',base_url:'http://127.0.0.1:0',api_key:'resolved-by-runtime',managed:true};
     const time=Date.now();
     const invoice={reference:'test-invoice-scope',amount:1000,created_at:new Date(time-60000).toISOString(),expires_at:new Date(time-1000).toISOString()};
@@ -147,12 +148,12 @@ test('original GoPay gateway converts analytics minor units and matches only rec
       writeFileSync(${JSON.stringify(fixture)},JSON.stringify([row('fractional-rupiah',100001,time-10000)]));
       await assert.rejects(()=>checkPayment(connection,invoice),error=>error.status===502);
       console.log(JSON.stringify({paid:proof.paid,amount:proof.amount,selectedOnTimeReceipt:proof.transaction_id==='on-time',wrongUnitRejected:true,fractionalRupiahRejected:true}));
-    } finally {await shutdownGateways();db.close();}
+    } finally {await shutdownGateways();(await db.close());}
   `;
   try {
     const child = Bun.spawn(['bun', '-e', script], {
       cwd: resolve(import.meta.dir, '..'),
-      env: { ...process.env, DATABASE_PATH: ':memory:', GATEWAY_DATA_DIR: join(directory, 'wallets'), GATEWAY_NODE_BINARY: executable, ENCRYPTION_KEY: 'd'.repeat(64) },
+      env: { ...process.env, GATEWAY_DATA_DIR: join(directory, 'wallets'), GATEWAY_NODE_BINARY: executable, ENCRYPTION_KEY: 'd'.repeat(64) },
       stdout: 'pipe', stderr: 'pipe',
     });
     const stdout = await new Response(child.stdout).text();

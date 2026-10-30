@@ -11,7 +11,7 @@ type ManagedRow = ConnectionRow & { managed: number; active: number; label: stri
 type Login = { child: ChildProcess; running: boolean; completed: boolean; lines: GatewayLog[]; timer: NodeJS.Timeout };
 type Runtime = { child: ChildProcess; base_url: string; api_key: string; shopee_token?: string };
 const vendorRoot = fileURLToPath(new URL('./vendor/', import.meta.url));
-const runtimeRoot = resolve(process.env.GATEWAY_DATA_DIR || join(process.env.DATA_DIR || (process.env.DATABASE_PATH && process.env.DATABASE_PATH !== ':memory:' ? dirname(process.env.DATABASE_PATH) : 'data'), 'wallets'));
+const runtimeRoot = resolve(process.env.GATEWAY_DATA_DIR || join(process.env.DATA_DIR || 'data', 'wallets'));
 const processes = new Map<string, Runtime>();
 const startups = new Map<string, Promise<Runtime>>();
 const logins = new Map<string, Login>();
@@ -21,8 +21,8 @@ const locks = new Map<string, Promise<unknown>>();
 const redactions = new Map<string, Set<string>>();
 let shuttingDown = false;
 
-export function managedRow(connectionId: string): ManagedRow {
-  const row = db.query<ManagedRow, [string]>('SELECT * FROM connections WHERE id = ?').get(connectionId);
+export async function managedRow(connectionId: string): Promise<ManagedRow> {
+  const row = await db.query<ManagedRow, [string]>('SELECT * FROM connections WHERE id = $1').get(connectionId);
   if (!row || !row.managed || !row.active) throw new BusinessError(404, 'Wallet managed aktif tidak ditemukan.');
   return row;
 }
@@ -165,7 +165,7 @@ async function start(row: ManagedRow): Promise<Runtime> {
 }
 export async function ensureGateway(connectionId: string): Promise<{ base_url: string; api_key: string; shopee_token?: string }> {
   if (shuttingDown) throw new BusinessError(503, 'Gateway sedang dihentikan.');
-  const row = managedRow(connectionId);
+  const row = await managedRow(connectionId);
   let runtime = processes.get(connectionId);
   if (runtime?.child.exitCode === null && runtime.child.signalCode === null) return runtime;
   if (logins.get(connectionId)?.running) throw new BusinessError(409, 'Login OTP sedang berjalan. Selesaikan login sebelum memakai wallet.');
@@ -211,7 +211,7 @@ export async function testManagedWallet(connectionId: string): Promise<{ valid: 
   return { valid, message: valid ? 'Sesi wallet valid menurut gateway.' : 'Sesi wallet tidak valid. Login ulang GoPay atau rotasi token ShopeePay.' };
 }
 export async function gatewayLogs(connectionId: string): Promise<GatewayLog[]> {
-  const row = managedRow(connectionId);
+  const row = await managedRow(connectionId);
   rememberSecrets(connectionId, walletSecrets(row));
   const result = await gatewayRequest(connectionId, '/api/logs');
   const entries = row.provider === 'shopeepay' ? (result.data as { logs?: unknown } | undefined)?.logs : result.logs;
@@ -224,7 +224,7 @@ export async function gatewayLogs(connectionId: string): Promise<GatewayLog[]> {
   return [...upstream, ...(logs.get(connectionId) || [])].sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-100);
 }
 export async function startLogin(connectionId: string) {
-  const row = managedRow(connectionId);
+  const row = await managedRow(connectionId);
   if (row.provider !== 'gopay') throw new BusinessError(400, 'OTP hanya tersedia melalui program GoPay.');
   if (logins.get(connectionId)?.running) throw new BusinessError(409, 'Login OTP sudah berjalan.');
   await stopGateway(connectionId);
@@ -255,7 +255,7 @@ export async function stopLogin(connectionId: string) {
   if (login?.running) { clearTimeout(login.timer); await terminate(login.child); login.running = false; }
 }
 export async function importSession(connectionId: string, session: unknown) {
-  const row = managedRow(connectionId);
+  const row = await managedRow(connectionId);
   if (row.provider !== 'gopay') throw new BusinessError(400, 'Import sesi hanya untuk GoPay.');
   let parsed: unknown = session;
   if (typeof session === 'string') { if (session.length > 65536) throw new BusinessError(400, 'Sesi maksimal 64 KiB.'); try { parsed = JSON.parse(session); } catch { throw new BusinessError(400, 'Sesi harus berupa JSON valid.'); } }
@@ -280,7 +280,7 @@ export async function importSession(connectionId: string, session: unknown) {
   }
 }
 export async function refreshSession(connectionId: string) {
-  if (managedRow(connectionId).provider !== 'gopay') throw new BusinessError(400, 'Refresh sesi hanya untuk GoPay.');
+  if ((await managedRow(connectionId)).provider !== 'gopay') throw new BusinessError(400, 'Refresh sesi hanya untuk GoPay.');
   await ensureGateway(connectionId);
   const child = processes.get(connectionId)!.child;
   const request = crypto.randomUUID();

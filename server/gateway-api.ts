@@ -8,14 +8,14 @@ import { expireInvoices } from './domain';
 type WalletRow = ConnectionRow & { managed: number; active: number; label: string };
 const tokenStatuses = new Map<string, 'valid' | 'invalid'>();
 
-function ownedWallet(userId: string, connectionId: string): WalletRow {
-  const row = db.query<WalletRow, [string, string]>('SELECT * FROM connections WHERE id = ? AND user_id = ? AND managed = 1 AND active = 1').get(connectionId, userId);
+async function ownedWallet(userId: string, connectionId: string): Promise<WalletRow> {
+  const row = await db.query<WalletRow, [string, string]>('SELECT * FROM connections WHERE id = $1 AND user_id = $2 AND managed = 1 AND active = 1').get(connectionId, userId);
   if (!row) throw new BusinessError(404, 'Wallet aktif milik Anda tidak ditemukan.');
   return row;
 }
-function refusePending(connectionId: string) {
-  expireInvoices();
-  const pending = db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM invoices WHERE connection_id = ? AND environment = 'production' AND status = 'pending' AND creation_state != 'failed'").get(connectionId);
+async function refusePending(connectionId: string) {
+  await expireInvoices();
+  const pending = await db.query<{ count: number }, [string]>("SELECT count(*)::integer AS count FROM invoices WHERE connection_id = $1 AND environment = 'production' AND status = 'pending' AND creation_state != 'failed'").get(connectionId);
   if (pending?.count) throw new BusinessError(409, 'Selesaikan atau batalkan invoice produksi pending sebelum mengganti akun, QRIS, atau sesi wallet.');
 }
 function walletDto(row: WalletRow) {
@@ -29,8 +29,8 @@ function walletDto(row: WalletRow) {
     token_status: row.managed ? tokenStatuses.get(row.id) || 'unknown' : 'unknown',
   };
 }
-export function listConnections(userId: string) {
-  return db.query<WalletRow, [string]>('SELECT * FROM connections WHERE user_id = ? AND active = 1 ORDER BY label, id').all(userId).map(walletDto);
+export async function listConnections(userId: string) {
+  return (await db.query<WalletRow, [string]>('SELECT * FROM connections WHERE user_id = $1 AND active = 1 ORDER BY label, id').all(userId)).map(walletDto);
 }
 function configuredSecrets(body: Record<string, unknown>, walletProvider: 'gopay' | 'shopeepay', previous?: WalletSecrets): WalletSecrets {
   const qris = body.qris_static === undefined && previous ? validateStaticQris(previous.qris_static) : validateStaticQris(body.qris_static);
@@ -86,89 +86,89 @@ async function transactions(row: WalletRow, query: Record<string, unknown>) {
 }
 
 export const gatewayRoutes = new Elysia({ name: 'managed-gateways' })
-  .get('/api/connections', ({ request }) => listConnections(sessionUser(request).id))
-  .post('/api/connections', ({ request, body }) => {
-    const user = sessionUser(request);
+  .get('/api/connections', async ({ request }) => await listConnections((await sessionUser(request)).id))
+  .post('/api/connections', async ({ request, body }) => {
+    const user = await sessionUser(request);
     rateLimit(`wallet-create:${user.id}`, 20, 3600_000);
     const input = objectBody(body);
     const walletProvider = provider(input.provider);
     const label = text(input, 'label', 80);
     const secrets = configuredSecrets(input, walletProvider);
     const connectionId = id();
-    db.query('INSERT INTO connections (id, user_id, provider, base_url, encrypted_secrets, kind, label, managed, active) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)').run(connectionId, user.id, walletProvider, 'http://127.0.0.1:0', encrypt(JSON.stringify(secrets)), 'merchant', label);
-    return walletDto(ownedWallet(user.id, connectionId));
+    await db.query('INSERT INTO connections (id, user_id, provider, base_url, encrypted_secrets, kind, label, managed, active) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1)').run(connectionId, user.id, walletProvider, 'http://127.0.0.1:0', encrypt(JSON.stringify(secrets)), 'merchant', label);
+    return walletDto(await ownedWallet(user.id, connectionId));
   })
   .put('/api/connections/:id', async ({ request, params, body }) => {
-    const user = sessionUser(request);
+    const user = await sessionUser(request);
     return withWalletLock(params.id, async () => {
-      const row = ownedWallet(user.id, params.id);
+      const row = await ownedWallet(user.id, params.id);
       const input = objectBody(body);
       if (input.provider !== undefined && input.provider !== row.provider) throw new BusinessError(400, 'Provider wallet tidak dapat diubah. Buat wallet baru.');
       const previous = walletSecrets(row);
       const secrets = configuredSecrets(input, row.provider, previous);
       const label = input.label === undefined ? row.label : text(input, 'label', 80);
       const accountChanged = secrets.qris_static !== previous.qris_static || secrets.merchant_id !== previous.merchant_id || secrets.shopee_token !== previous.shopee_token;
-      if (accountChanged) refusePending(row.id);
+      if (accountChanged) await refusePending(row.id);
       await stopLogin(row.id);
       await stopGateway(row.id);
-      atomic(() => {
-        if (accountChanged) refusePending(row.id);
-        db.query('UPDATE connections SET label = ?, encrypted_secrets = ? WHERE id = ? AND user_id = ?').run(label, encrypt(JSON.stringify(secrets)), row.id, user.id);
+      await atomic(async () => {
+        if (accountChanged) await refusePending(row.id);
+        await db.query('UPDATE connections SET label = $1, encrypted_secrets = $2 WHERE id = $3 AND user_id = $4').run(label, encrypt(JSON.stringify(secrets)), row.id, user.id);
       });
       tokenStatuses.delete(row.id);
-      return walletDto(ownedWallet(user.id, row.id));
+      return walletDto(await ownedWallet(user.id, row.id));
     });
   })
   .delete('/api/connections/:id', async ({ request, params }) => {
-    const user = sessionUser(request);
+    const user = await sessionUser(request);
     return withWalletLock(params.id, async () => {
-      const row = db.query<WalletRow, [string, string]>('SELECT * FROM connections WHERE id = ? AND user_id = ? AND active = 1').get(params.id, user.id);
+      const row = await db.query<WalletRow, [string, string]>('SELECT * FROM connections WHERE id = $1 AND user_id = $2 AND active = 1').get(params.id, user.id);
       if (!row) throw new BusinessError(404, 'Wallet milik Anda tidak ditemukan.');
-      atomic(() => { refusePending(row.id); db.query('UPDATE connections SET active = 0 WHERE id = ? AND user_id = ?').run(row.id, user.id); });
+      await atomic(async () => { await refusePending(row.id); await db.query('UPDATE connections SET active = 0 WHERE id = $1 AND user_id = $2').run(row.id, user.id); });
       await stopLogin(row.id); await stopGateway(row.id); tokenStatuses.delete(row.id);
       return { success: true };
     });
   })
   .post('/api/connections/:id/test', async ({ request, params }) => {
-    const user = sessionUser(request); const row = ownedWallet(user.id, params.id);
+    const user = await sessionUser(request); const row = await ownedWallet(user.id, params.id);
     rateLimit(`wallet-test:${row.id}`, 10, 60_000);
     const result = await testManagedWallet(row.id);
     tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid');
     return result;
   })
-  .get('/api/connections/:id/transactions', async ({ request, params, query }) => transactions(ownedWallet(sessionUser(request).id, params.id), query))
-  .get('/api/connections/:id/logs', async ({ request, params }) => ({ logs: await gatewayLogs(ownedWallet(sessionUser(request).id, params.id).id) }))
+  .get('/api/connections/:id/transactions', async ({ request, params, query }) => transactions(await ownedWallet((await sessionUser(request)).id, params.id), query))
+  .get('/api/connections/:id/logs', async ({ request, params }) => ({ logs: await gatewayLogs((await ownedWallet((await sessionUser(request)).id, params.id)).id) }))
   .post('/api/connections/:id/login/start', async ({ request, params }) => {
-    const user = sessionUser(request);
-    return withWalletLock(params.id, async () => { const row = ownedWallet(user.id, params.id); refusePending(row.id); rateLimit(`wallet-login:${row.id}`, 5, 3600_000); tokenStatuses.delete(row.id); return startLogin(row.id); });
+    const user = await sessionUser(request);
+    return withWalletLock(params.id, async () => { const row = await ownedWallet(user.id, params.id); await refusePending(row.id); rateLimit(`wallet-login:${row.id}`, 5, 3600_000); tokenStatuses.delete(row.id); return await startLogin(row.id); });
   })
-  .post('/api/connections/:id/login/input', ({ request, params, body }) => {
-    const row = ownedWallet(sessionUser(request).id, params.id);
+  .post('/api/connections/:id/login/input', async ({ request, params, body }) => {
+    const row = await ownedWallet((await sessionUser(request)).id, params.id);
     if (row.provider !== 'gopay') throw new BusinessError(400, 'OTP hanya untuk GoPay.');
     rateLimit(`wallet-input:${row.id}`, 30, 60_000);
     return loginInput(row.id, text(objectBody(body), 'value', 200));
   })
-  .get('/api/connections/:id/login', ({ request, params }) => loginStatus(ownedWallet(sessionUser(request).id, params.id).id))
+  .get('/api/connections/:id/login', async ({ request, params }) => loginStatus((await ownedWallet((await sessionUser(request)).id, params.id)).id))
   .post('/api/connections/:id/session', async ({ request, params, body }) => {
-    const user = sessionUser(request); const input = objectBody(body);
-    return withWalletLock(params.id, async () => { const row = ownedWallet(user.id, params.id); refusePending(row.id); rateLimit(`wallet-session:${row.id}`, 5, 60_000); const result = await importSession(row.id, input.session); tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid'); return result; });
+    const user = await sessionUser(request); const input = objectBody(body);
+    return withWalletLock(params.id, async () => { const row = await ownedWallet(user.id, params.id); await refusePending(row.id); rateLimit(`wallet-session:${row.id}`, 5, 60_000); const result = await importSession(row.id, input.session); tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid'); return result; });
   })
   .post('/api/connections/:id/refresh', async ({ request, params }) => {
-    const user = sessionUser(request);
-    return withWalletLock(params.id, async () => { const row = ownedWallet(user.id, params.id); rateLimit(`wallet-refresh:${row.id}`, 5, 60_000); const result = await refreshSession(row.id); tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid'); return result; });
+    const user = await sessionUser(request);
+    return withWalletLock(params.id, async () => { const row = await ownedWallet(user.id, params.id); rateLimit(`wallet-refresh:${row.id}`, 5, 60_000); const result = await refreshSession(row.id); tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid'); return result; });
   })
   .post('/api/connections/:id/token', async ({ request, params, body }) => {
-    const user = sessionUser(request); const input = objectBody(body);
+    const user = await sessionUser(request); const input = objectBody(body);
     return withWalletLock(params.id, async () => {
-      const row = ownedWallet(user.id, params.id);
+      const row = await ownedWallet(user.id, params.id);
       if (row.provider !== 'shopeepay') throw new BusinessError(400, 'Rotasi token manual hanya untuk ShopeePay.');
       const token = text(input, 'shopee_token', 8192);
       if (/[\r\n\x00-\x1f\x7f]/.test(token)) throw new BusinessError(400, 'Token tidak boleh mengandung karakter kontrol.');
-      refusePending(row.id);
+      await refusePending(row.id);
       rateLimit(`wallet-token:${row.id}`, 5, 60_000);
       await stopGateway(row.id);
       const secrets = { ...walletSecrets(row), shopee_token: token };
-      db.query('UPDATE connections SET encrypted_secrets = ? WHERE id = ? AND user_id = ?').run(encrypt(JSON.stringify(secrets)), row.id, user.id);
+      await db.query('UPDATE connections SET encrypted_secrets = $1 WHERE id = $2 AND user_id = $3').run(encrypt(JSON.stringify(secrets)), row.id, user.id);
       tokenStatuses.delete(row.id);
       const result = await testManagedWallet(row.id);
       tokenStatuses.set(row.id, result.valid ? 'valid' : 'invalid');

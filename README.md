@@ -1,6 +1,6 @@
 # QRIS Gateway
 
-Platform invoice QRIS multi-merchant dengan **ElysiaJS + Bun**, SQLite persisten, dan Svelte 5/Vite. UI Indonesia memakai Neo-Brutalism cream/ink/lime. Dana pembayaran produksi masuk ke akun merchant provider, bukan saldo yang ditampung aplikasi.
+Platform invoice QRIS multi-merchant dengan **ElysiaJS + Bun**, PostgreSQL persisten, dan Svelte 5/Vite. UI Indonesia memakai Neo-Brutalism cream/ink/lime. Dana pembayaran produksi masuk ke akun merchant provider, bukan saldo yang ditampung aplikasi.
 
 **Program GitHub benar-benar dibundel dan dijalankan**, bukan hanya adapter ke domain/API key yang dimasukkan merchant. Setiap dompet memiliki proses Node, konfigurasi, QRIS, dan direktori sesi sendiri. API key private gateway dibuat oleh platform dan tidak diberikan kepada pelanggan.
 
@@ -20,12 +20,13 @@ Ini platform **software QRIS**, bukan seluruh kanal Midtrans/Xendit: tidak ada V
 
 ## Instalasi lokal
 
-Diperlukan **Bun**, **Node.js >=18**, dan **npm**. Aplikasi utama memakai Bun; program upstream aslinya memakai Node.
+Diperlukan **Bun >=1.3**, **Node.js >=18**, **npm**, dan **PostgreSQL** (atau Docker Compose untuk database lokal). Aplikasi utama memakai Bun; program upstream aslinya memakai Node.
 
 ```sh
 bun install --frozen-lockfile
 bun run gateways:install
 bun run setup
+docker compose up -d database
 bun run dev
 ```
 
@@ -100,7 +101,7 @@ Produksi memerlukan `connection_id` dompet terkelola, aktif, milik merchant, dan
 
 - Kuota gratis berlaku **bersama seluruh dompet akun**, bukan 5 per provider/dompet.
 - Invoice produksi yang berhasil dibuat tetap dihitung walau paid/expired/cancelled. Pembuatan gagal melepas reservasi kuota.
-- Permintaan bersamaan tidak dapat melewati lima slot; kuota tersimpan di SQLite dan bertahan restart.
+- Permintaan bersamaan tidak dapat melewati lima slot; kuota tersimpan di PostgreSQL dan bertahan restart.
 - Reset mengikuti kalender WIB, tidak mengikuti waktu browser atau 24 jam sejak pendaftaran.
 - Pengulangan external_id identik dalam environment yang sama mengembalikan invoice sebelumnya tanpa menambah kuota. Data berbeda menghasilkan 409. Jika pembuatan reference itu gagal, gunakan reference baru setelah rekonsiliasi.
 - Paid/admin tidak memakai batas gratis harian. Setelah sewa berakhir, merchant kembali gratis.
@@ -212,36 +213,48 @@ bun run start
 docker compose up -d --build
 ```
 
-`compose.yaml` mengikat port ke `127.0.0.1:3100`; terminasi HTTPS melalui reverse proxy Anda. Image memuat Bun dan Node 22, memasang vendor dependencies saat build, dan berjalan sebagai user node. Volume `qris-data` menyimpan SQLite **dan** direktori dompet/sesi `/app/data/wallets`. Tidak perlu membuka port child gateway; semuanya IPv4 loopback dengan port OS-assigned.
+`compose.yaml` mengikat port ke `127.0.0.1:3100`; terminasi HTTPS melalui reverse proxy Anda. Image memuat Bun dan Node 22, memasang vendor dependencies saat build, dan berjalan sebagai user node. Volume `qris-postgres` menyimpan database PostgreSQL; volume `qris-data` menyimpan direktori dompet/sesi `/app/data/wallets`. Database hanya dipublikasikan ke loopback host; aplikasi Docker mengakses service `database` setelah healthcheck lulus. Tidak perlu membuka port child gateway; semuanya IPv4 loopback dengan port OS-assigned.
 
-Konfigurasi `.env.example`: APP_URL, HOST, PORT, DATA_DIR, SETUP_TOKEN, ENCRYPTION_KEY. DATABASE_PATH opsional untuk lokasi SQLite, GATEWAY_DATA_DIR untuk lokasi private wallet, GATEWAY_NODE_BINARY untuk executable Node operator. GATEWAY_ALLOWED_HOSTS hanya untuk rekonsiliasi **invoice lama** dari adapter eksternal; tidak dipakai onboarding dompet baru.
+Konfigurasi `.env.example`: DATABASE_URL, POSTGRES_PASSWORD, APP_URL, HOST, PORT, DATA_DIR, SETUP_TOKEN, ENCRYPTION_KEY. `setup` menghasilkan password PostgreSQL acak dan URL lokal yang sesuai. Untuk database eksternal, isi DATABASE_URL sesuai server Anda; parameter TLS didukung oleh driver Bun SQL. POSTGRES_PASSWORD digunakan service database Compose; gunakan password yang sama dan URL-encode pada DATABASE_URL. POSTGRES_PORT opsional untuk port host Compose (default 5432); sesuaikan DATABASE_URL lokal bila port diubah. GATEWAY_DATA_DIR untuk lokasi private wallet, GATEWAY_NODE_BINARY untuk executable Node operator. GATEWAY_ALLOWED_HOSTS hanya untuk rekonsiliasi **invoice lama** dari adapter eksternal; tidak dipakai onboarding dompet baru.
 
 Proses per dompet mengisolasi konfigurasi dan state upstream, **bukan sandbox keamanan OS terhadap kode vendor yang berbahaya**. Jalankan source/vendor tepercaya dan lindungi akses lokal server. Process dimulai on-demand; kapasitas RAM server harus disesuaikan jumlah dompet aktif.
 
 ## Backup, upgrade, dan rekonsiliasi
 
-- Backup SQLite secara konsisten dengan SQLite backup/serialize atau hentikan server sebelum menyalin database beserta WAL. Jangan hanya menyalin sqlite yang sedang ditulis.
-- Backup ENCRYPTION_KEY dan direktori wallet bersama-sama, pada media private. Rahasia konfigurasi terenkripsi AES-256-GCM di SQLite; **file sesi GoPay format asli tidak dienkripsi**, berizin 0600 dalam direktori 0700.
+- Backup PostgreSQL dengan `pg_dump --format=custom` dan uji pemulihan menggunakan `pg_restore` pada database terpisah. Backup database, konfigurasi rahasia, dan wallet dalam jendela pemeliharaan yang sama agar konsisten. Jangan menghapus volume `qris-postgres` saat upgrade.
+- Backup ENCRYPTION_KEY dan direktori wallet bersama-sama, pada media private. Rahasia konfigurasi terenkripsi AES-256-GCM di PostgreSQL; **file sesi GoPay format asli tidak dienkripsi**, berizin 0600 dalam direktori 0700.
 - Jangan menyimpan `.env`, database, sesi, token, atau vendor node_modules ke Git. Jangan menimpa .env saat upgrade.
-- Migrasi mempertahankan ID, FK, receipt claims, rentals, kunci, webhook, byte outbox, serta trigger/index eksplisit. Record lama menjadi production.
+- Importer SQLite mempertahankan ID, FK, receipt claims, rentals, kunci, webhook, dan byte outbox. Record legacy tanpa environment menjadi production. Index/constraint PostgreSQL dibuat oleh schema aplikasi; tabel atau trigger SQLite kustom ditolak dan perlu dipindahkan manual.
 - Koneksi eksternal lama hanya untuk invoice historis, tidak dapat membuat invoice produksi baru. Onboarding dompet terkelola baru; selesaikan invoice lama sebelum menonaktifkan koneksi.
 - Jangan mengubah akun/QRIS/sesi di balik invoice pending. Jika upstream tidak dapat diperiksa, gunakan mutasi portal dan bukti pelanggan; kegagalan API bukan bukti dana belum diterima.
 
-## Verifikasi yang sudah dijalankan
+## Migrasi dari SQLite
 
-- `bun run check`: 0 error; 7 warning Svelte terkait tabindex pada region tabel scroll. Region sengaja dapat difokuskan untuk scroll keyboard; perilaku ArrowRight diuji di browser, warning tidak disembunyikan.
-- `bun test`: **41 pass, 0 fail**, 212 assertion dalam lima file. Termasuk migrasi legacy/restart, byte outbox tetap, isolasi proses gateway nyata, penyelesaian CLI interaktif, konversi nominal analytics GoPay melalui server asli, batas akhir bukti pembayaran, rekonsiliasi setelah expiry, aktivasi sewa satu kali, CRC/nominal QR, tenant/key scope, WIB/concurrency quota, pembayaran, dan sandbox.
-- `bun run build`: berhasil. Decoder QR dimuat sebagai chunk terpisah saat scan/import diperlukan.
-- Smoke HTTP pada database QA terpisah: tiga wallet termasuk dua GoPay, QR asli GoPay/ShopeePay dengan nama/nominal benar, invoice keenam 429, replay idempotent, kuota bertahan restart, sandbox paid/failed/expired, cross-scope ditolak, log kedua provider, prompt asli CLI GoPay, sewa manual/otomatis, dan guard simulator sewa.
-- Smoke lifecycle login terisolasi: CLI selesai keluar dengan kode 0; pemutusan IPC parent menghentikan child yang menunggu input. Program GoPay asli tetap menunggu nomor HP, pembatalan membebaskan wallet, health gateway mengembalikan 200, dan refresh tanpa sesi mendapat penolakan upstream 502 melalui IPC, bukan timeout.
-- Pembayaran GoPay produksi Rp1.000 yang dilaporkan pengguna diverifikasi dari QRIS settlement nyata. Tombol rekonsiliasi mengubah invoice expired menjadi paid melalui gateway dan menyimpan satu klaim transaksi; status bertahan setelah reload tanpa QR untuk dibayar ulang. Tombol diaktifkan lewat Enter; layar 320/390px tidak overflow, target sentuh 66px pada 320px, kontras teks tombol 19.24:1, tanpa error browser pada alur ini.
-- Panduan rekonsiliasi diperiksa pada build produksi terisolasi dengan akun QA dan SQLite in-memory: penjelasan pembayaran tepat waktu/terlambat tampil di layar 390px tanpa overflow atau error browser. Layanan QA dihentikan dan skrip sementara dihapus setelah pemeriksaan.
-- Browser nyata: login, onboarding, decode PNG lokal, modal/Escape, simulator lunas, panduan/copy HMAC, menu mobile, tabel ArrowRight, admin hanya-baca sandbox dan harga produksi. Enam halaman pada 390/320px tidak overflow horizontal; zoom 200% diperiksa. Tidak ada error JavaScript pada alur yang diperiksa.
-- Kontras 47 node teks halaman admin: minimum 5.56:1, tanpa pelanggaran AA pada sampel terukur.
-- Docker build dan container aktual: signup serta invoice GoPay memulai Node gateway di dalam image Bun; nama merchant dipertahankan.
-- `npm audit --omit=dev` kedua gateway setelah pembaruan lockfile: **0 vulnerability yang dilaporkan**. Ini hasil audit saat verifikasi, bukan jaminan keamanan masa depan.
+Panduan langkah demi langkah untuk server Docker maupun Bun langsung, termasuk persiapan, backup, maintenance, impor, verifikasi, rollback, dan backup rutin: **[Update server dari SQLite ke PostgreSQL](docs/migrasi-postgresql.md)**.
 
-**Batas bukti:** pengguna melaporkan OTP GoPay berhasil dan sesi tersimpan. Pengujian lifecycle tidak mengulang OTP. Diagnosis pembayaran memakai sesi tersimpan melalui session manager asli untuk membaca mutasi dan memverifikasi QRIS settlement Rp1.000 yang dibayar pengguna; token tidak ditampilkan dan status paid berasal dari bukti gateway. Refresh autentikasi valid, pembayaran ShopeePay nyata, Telegram, receiver webhook publik, dan kamera fisik belum diverifikasi. QR QA memakai identitas TEST-ONLY yang tidak untuk dibayar. Uji provider dan penerima webhook milik Anda sebelum menawarkan produksi. Kamera pada browser QA berada pada tahap izin; decode PNG terbukti.
+1. Hentikan seluruh instance aplikasi dan worker lama agar SQLite tidak berubah selama cutover. Backup SQLite secara konsisten (termasuk WAL jika menyalin file), `.env`, serta direktori wallet. Jangan mengganti ENCRYPTION_KEY.
+2. Pada `.env` yang sudah ada, tambahkan POSTGRES_PASSWORD acak dan DATABASE_URL PostgreSQL tujuan. Jangan menjalankan ulang `setup` atau menimpa rahasia lama. Jalankan `docker compose up -d database` jika memakai database Compose.
+3. Arahkan DATABASE_URL ke database tujuan **kosong**, lalu jalankan:
+
+   ```sh
+   bun run db:import:sqlite ./data/qris.sqlite
+   ```
+
+   Untuk stack Docker, importer juga tersedia di image: `docker compose run --rm --no-deps app bun run db:import:sqlite /app/data/qris.sqlite` (build image baru dan jalankan database dahulu; gunakan path SQLite dari volume lama).
+4. Importer membuka SQLite read-only, memeriksa relasi dan jumlah record, lalu memasukkan data dalam satu transaksi PostgreSQL. Impor gagal di-rollback; tujuan yang berisi data ditolak. Path SQLite harus diberikan eksplisit; aplikasi tidak lagi membaca DATABASE_PATH.
+5. Mulai aplikasi dengan DATABASE_URL baru serta ENCRYPTION_KEY dan lokasi wallet lama. Periksa login, invoice historis, checkout, dan status wallet sebelum membuka traffic kembali. Simpan SQLite dan backup lama sampai verifikasi selesai. Jika rollback diperlukan, hentikan aplikasi baru dan rekonsiliasi setiap transaksi setelah cutover sebelum menjalankan versi SQLite kembali.
+
+Transaksi bisnis pendek memakai PostgreSQL advisory transaction lock yang sama lintas proses untuk menjaga kuota, nominal unik, receipt, aktivasi sewa, dan lease outbox. Query async memakai connection pool; I/O provider dan webhook berjalan di luar transaksi. Lock ini masih menserialisasi transisi bisnis; ukur contention sebelum meningkatkan jumlah worker. Runtime gateway dan file sesi masih lokal per instance, sehingga migrasi database ini sendiri belum membuat pengelolaan gateway siap multi-server.
+
+## Verifikasi
+
+```sh
+bun run check
+TEST_DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/postgres bun run test
+bun run build
+```
+
+Role pengujian memerlukan CREATEDB. Runner membuat database acak per file suite dan menghapusnya setelah selesai; tidak memakai database aplikasi. Jalankan `bun run test`, bukan `bun test` langsung. Pengujian meliputi pembayaran, kuota paralel, isolasi tenant/environment, gateway asli tanpa jaringan provider eksternal, dan impor legacy SQLite (byte outbox, relasi, sumber tidak diubah, penolakan impor ulang, dan rollback).
 
 ## Desain dan delivery gate
 

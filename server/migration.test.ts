@@ -1,3 +1,4 @@
+if (process.env.QRIS_TEST_DATABASE !== '1') throw new Error('Jalankan bun run test dengan TEST_DATABASE_URL.');
 import { Database } from 'bun:sqlite';
 import { expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -19,8 +20,6 @@ test('migrates legacy financial records without changing signed outbox bytes or 
     CREATE TABLE api_keys(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),label TEXT,prefix TEXT,key_hash TEXT UNIQUE,created_at TEXT);
     CREATE TABLE webhooks(user_id TEXT PRIMARY KEY REFERENCES users(id),url TEXT,encrypted_secret TEXT);
     CREATE TABLE webhook_deliveries(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),invoice_id TEXT REFERENCES invoices(id),event TEXT,payload TEXT,url TEXT,encrypted_secret TEXT,status INTEGER,error TEXT,attempts INTEGER,created_at TEXT,next_attempt_at TEXT,lease_until TEXT,delivered_at TEXT,UNIQUE(invoice_id,event));
-    CREATE TABLE legacy_audit(invoice_id TEXT);
-    CREATE TRIGGER legacy_invoice_update AFTER UPDATE OF status ON invoices BEGIN INSERT INTO legacy_audit VALUES (NEW.id); END;
     INSERT INTO users VALUES ('merchant','Legacy merchant','legacy@example.test','old-hash','merchant',NULL,'2026-01-01T00:00:00Z');
     INSERT INTO connections VALUES ('wallet','merchant','gopay','http://localhost:3000','preserved-ciphertext','merchant');
     INSERT INTO rentals VALUES ('rental','merchant',7,10000,'active',NULL,'2026-01-01T00:00:00Z','2026-01-01T00:01:00Z');
@@ -32,29 +31,36 @@ test('migrates legacy financial records without changing signed outbox bytes or 
   legacy.query("INSERT INTO webhook_deliveries VALUES ('delivery','merchant','invoice','invoice.paid',?,'https://example.test/hook','old-webhook-ciphertext',200,NULL,1,'2026-01-01T00:01:00Z',NULL,NULL,'2026-01-01T00:01:01Z')").run(originalPayload);
   legacy.close();
   try {
-    for (let pass = 0; pass < 2; pass++) {
-      const child = Bun.spawn(['bun', '-e', `const {db}=await import('./server/db.ts');console.log(JSON.stringify({foreignKeys:db.query('PRAGMA foreign_key_check').all(),invoice:db.query('SELECT * FROM invoices WHERE id="invoice"').get(),claim:db.query('SELECT * FROM transaction_claim').get(),payload:db.query('SELECT payload FROM webhook_deliveries').get().payload,connection:db.query('SELECT * FROM connections WHERE id="wallet"').get(),key:db.query('SELECT environment FROM api_keys').get()}));db.close();`], {
-        cwd: resolve(import.meta.dir, '..'), env: { ...process.env, DATABASE_PATH: path }, stdout: 'pipe', stderr: 'pipe',
-      });
-      const stdout = await new Response(child.stdout).text();
-      const stderr = await new Response(child.stderr).text();
-      expect(await child.exited, stderr).toBe(0);
-      const result = JSON.parse(stdout);
-      expect(result.foreignKeys).toEqual([]);
-      expect(result.invoice).toMatchObject({ id: 'invoice', status: 'paid', rental_id: 'rental', connection_id: 'wallet', environment: 'production', payable_amount: 10000, checkout_token: 'legacy-checkout-token' });
-      expect(result.claim).toMatchObject({ invoice_id: 'invoice', transaction_id: 'receipt' });
-      expect(result.payload).toBe(originalPayload);
-      expect(result.connection).toMatchObject({ encrypted_secrets: 'preserved-ciphertext', managed: 0, active: 1 });
-      expect(result.key.environment).toBe('production');
-    }
-    const migrated = new Database(path);
-    try {
-      migrated.exec(`INSERT INTO connections(id,user_id,provider,base_url,encrypted_secrets) VALUES ('wallet-2','merchant','gopay','http://127.0.0.1:0','new-ciphertext');
-        INSERT INTO invoices(id,user_id,environment,external_id,description,amount,payable_amount,provider,status,creation_state,created_at,expires_at,checkout_token) VALUES ('sandbox','merchant','sandbox','order-1','Sandbox invoice',10000,10000,'gopay','pending','ready','2026-01-01T00:00:00Z','2026-01-01T00:05:00Z','sandbox-checkout-token');
-        UPDATE invoices SET status='expired' WHERE id='invoice';`);
-      expect(migrated.query('SELECT invoice_id FROM legacy_audit').all()).toEqual([{ invoice_id: 'invoice' }]);
-      expect(migrated.query('SELECT count(*) AS total FROM connections WHERE user_id="merchant"').get()).toEqual({ total: 2 });
-      expect(migrated.query('PRAGMA foreign_key_check').all()).toEqual([]);
-    } finally { migrated.close(); }
+    const { importSqlite } = await import('../scripts/migrate-sqlite');
+    const { db } = await import('./db');
+    const before = new Bun.CryptoHasher('sha256').update(await Bun.file(path).arrayBuffer()).digest('hex');
+    const counts = await importSqlite(path);
+    expect(counts.users).toBe(1);
+    expect(counts.invoices).toBe(1);
+    expect(await db.query('SELECT * FROM invoices WHERE id = $1').get('invoice')).toMatchObject({
+      id: 'invoice', status: 'paid', rental_id: 'rental', connection_id: 'wallet', environment: 'production', payable_amount: 10000, checkout_token: 'legacy-checkout-token',
+    });
+    expect(await db.query('SELECT * FROM transaction_claim').get()).toMatchObject({ invoice_id: 'invoice', transaction_id: 'receipt' });
+    expect(await db.query<{ payload: string }>('SELECT payload FROM webhook_deliveries').get()).toEqual({ payload: originalPayload });
+    expect(await db.query('SELECT * FROM connections WHERE id = $1').get('wallet')).toMatchObject({ encrypted_secrets: 'preserved-ciphertext', managed: 0, active: 1 });
+    expect(await db.query('SELECT environment FROM api_keys').get()).toEqual({ environment: 'production' });
+    expect(new Bun.CryptoHasher('sha256').update(await Bun.file(path).arrayBuffer()).digest('hex')).toBe(before);
+    await expect(importSqlite(path)).rejects.toThrow('harus kosong');
+    await expect(db.query("INSERT INTO transaction_claim VALUES ('missing','receipt-2','invoice','2026-01-01')").run()).rejects.toThrow();
+    const child = Bun.spawn(['bun', '-e', `const {db}=await import('./server/db.ts');console.log(JSON.stringify(await db.query('SELECT payload FROM webhook_deliveries').get()));await db.close();`], {
+      cwd: resolve(import.meta.dir, '..'), env: process.env, stdout: 'pipe', stderr: 'pipe',
+    });
+    const stdout = await new Response(child.stdout).text();
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ payload: originalPayload });
+
+    await db.exec('TRUNCATE users, sessions, connections, api_keys, rentals, invoices, transaction_claim, webhooks, webhook_deliveries, admin_audit');
+    const invalid = new Database(path);
+    invalid.exec('UPDATE invoices SET amount = -1');
+    invalid.close();
+    await expect(importSqlite(path)).rejects.toThrow();
+    expect(await db.query('SELECT COUNT(*)::integer AS total FROM users').get()).toEqual({ total: 0 });
+    expect(await db.query('SELECT COUNT(*)::integer AS total FROM invoices').get()).toEqual({ total: 0 });
+    await db.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }, 15000);

@@ -15,6 +15,7 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3100 DATA_DIR=/app/data
 COPY --from=build /app/package.json /app/bun.lock ./
 RUN bun install --frozen-lockfile --production && mkdir -p /app/data && chown -R node:node /app/data
 COPY --from=build /app/server ./server
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 3100
